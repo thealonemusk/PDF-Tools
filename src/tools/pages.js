@@ -12,7 +12,8 @@ async function buildFromEntries(bytes, entries) {
   const copied = await out.copyPages(src, entries.map((e) => e.src));
   copied.forEach((page, i) => {
     const rot = entries[i].rot || 0;
-    if (rot) page.setRotation(degrees((page.getRotation().angle + rot) % 360));
+    // /Rotate may be negative or above 360 in the source file; always write a value in 0-270
+    if (rot) page.setRotation(degrees((((page.getRotation().angle + rot) % 360) + 360) % 360));
     out.addPage(page);
   });
   return saveDoc(out);

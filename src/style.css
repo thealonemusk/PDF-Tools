@@ -189,6 +189,8 @@ input[type=range] { width: 100%; accent-color: var(--brand); }
 .stamp-overlay { position: absolute; inset: 0; pointer-events: none; line-height: 1; }
 .stamp-mark { position: absolute; transform-origin: center; }
 .stamp-overlay span { white-space: nowrap; }
+/* the PDF standard fonts are drawn without kerning or ligatures: previews must match the saved widths */
+.stamp-overlay span, .ed-text-inner { font-kerning: none; font-variant-ligatures: none; }
 .num-preview { position: absolute; }
 .pos-grid { display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: 1fr 40px 1fr; gap: 6px; width: 150px; aspect-ratio: 0.75; padding: 8px; background: #eef0f4; border-radius: 8px; }
 .pos-grid button { border: 2px solid transparent; background: #fff; border-radius: 6px; cursor: pointer; }
@@ -230,7 +232,7 @@ input[type=range] { width: 100%; accent-color: var(--brand); }
 .ed-obj svg { overflow: visible; }
 .ed-highlight { mix-blend-mode: multiply; }
 .ed-text { min-width: 8px; }
-.ed-text-inner { white-space: pre; outline: none; min-width: 4px; min-height: 1em; cursor: move; }
+.ed-text-inner { white-space: pre; tab-size: 4; outline: none; min-width: 4px; min-height: 1em; cursor: move; }
 .ed-text-inner:focus { cursor: text; }
 .ed-handle, .ed-del { position: absolute; display: none; }
 .ed-obj.selected .ed-handle, .ed-obj.selected .ed-del { display: block; }

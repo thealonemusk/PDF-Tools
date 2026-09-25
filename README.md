@@ -32,7 +32,7 @@ Routing is hash-based (`#/merge`, `#/split`, ...), so the app works on any stati
 
 - All PDF parsing, rendering and writing happens locally, in the browser tab (pdf.js runs in a Web Worker).
 - No backend, no uploads, no analytics, no cookies.
-- The only external requests are for **Google Fonts** (Inter and the signature fonts), loaded from `index.html`. To be fully offline or third-party-free, self-host the fonts and remove the Google Fonts `<link>` tags (then drop the `fonts.googleapis.com` / `fonts.gstatic.com` entries from the CSP).
+- The only external requests are for **Google Fonts** (Inter, the signature fonts, and Arimo / Tinos / Cousine — metric-compatible stand-ins for the PDF standard fonts, downloaded only on devices without Arial / Times New Roman / Courier New), loaded from `index.html`. To be fully offline or third-party-free, self-host the fonts and remove the Google Fonts `<link>` tags (then drop the `fonts.googleapis.com` / `fonts.gstatic.com` entries from the CSP).
 - The shipped Content-Security-Policy (see below) blocks connections to any other origin.
 
 ## Running locally
@@ -51,7 +51,7 @@ npm run build      # outputs static files to dist/
 npm run preview    # serve dist/ locally to check the production build
 ```
 
-`vite.config.js` uses `base: './'`, so the build uses relative asset paths and works from the domain root **or any sub-path** (for example `https://user.github.io/pdf-tools/`). The output is plain static files: `index.html`, `assets/*.js`, `assets/*.css` and the pdf.js worker `assets/pdf.worker.min-*.mjs`.
+`vite.config.js` uses `base: './'`, so the build uses relative asset paths and works from the domain root **or any sub-path** (for example `https://user.github.io/pdf-tools/`). The output is plain static files: `index.html`, `assets/*.js`, `assets/*.css`, the pdf.js worker `assets/pdf.worker.min-*.mjs`, and `pdfjs/` — the pdf.js runtime data (CMaps for CJK and other non-embedded fonts, standard font data, an ICC profile for CMYK colours and the JPEG 2000 / JBIG2 wasm decoders). A small plugin in `vite.config.js` copies `pdfjs/` from `node_modules/pdfjs-dist` on build and serves it in dev; deploy it along with everything else or such PDFs render with blank text or missing images.
 
 ## Deployment
 
@@ -116,7 +116,7 @@ If you add features that load resources from other origins, update both files.
 
 ## Known limitations
 
-- **Editing existing text** covers the original line with its background colour and draws the replacement in a standard font (Helvetica / Times / Courier), so the width may differ slightly from the original and anything directly behind the line (e.g. a grid line) is covered too. Rotated or vertical text lines can't be edited.
+- **Editing existing text** covers the original line with its background colour and draws the replacement in the closest standard font (Helvetica / Times / Courier, keeping bold and italic), so the width may differ slightly from the original and anything directly behind the line (e.g. a grid line) is covered too. Rotated or vertical text lines can't be edited.
 - **Compress "Recommended" and "Extreme" rasterize pages** into images. Output is much smaller, but text is no longer selectable or searchable. "Lossless" keeps the original content but usually saves little.
-- **Non-Latin text** (e.g. Devanagari, CJK, Arabic) added in Edit, Watermark or Sign is drawn as an image, because the standard PDF fonts only cover Latin characters. It looks right but is not selectable text.
+- **Non-Latin text** (e.g. Devanagari, CJK, Arabic) added in Edit, Watermark or Page numbers is drawn as an image, because the standard PDF fonts only cover Latin characters. Only those parts of a line become images; Latin words on the same line stay real, selectable text (right-to-left lines are kept as one image to preserve their order).
 - Very large files are limited by the browser's memory, since everything is processed in the tab.

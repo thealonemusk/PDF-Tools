@@ -1,7 +1,7 @@
 // Watermark and page-number tools.
 import { el, withBusy, download, toast, field, select, segmented, parseRanges, baseName } from '../lib/ui.js';
 import { openForEdit, saveDoc, renderThumb } from '../lib/pdf.js';
-import { FONTS, pageFrame, drawTextVisual, measureText } from '../lib/stamp.js';
+import { FONTS, cssFont, fontStyles, loadFonts, measureCanvas, pageFrame, drawTextVisual, measureText } from '../lib/stamp.js';
 import { singlePdfTool, actionButton, panel } from '../lib/tool.js';
 
 const fontOptions = Object.entries(FONTS).map(([k, f]) => [k, f.label]);
@@ -58,22 +58,13 @@ function watermarkCentres(mode, width, height, tw, sz, angle) {
   return out;
 }
 
-/** Approximate text width in points for the live preview. */
-function previewTextWidth(text, sizePt, fontKey) {
-  const f = FONTS[fontKey] || FONTS.helvetica;
-  const ctx = document.createElement('canvas').getContext('2d');
-  ctx.font = `${f.weight || 'normal'} ${sizePt}px ${f.css}`;
-  return ctx.measureText(text).width;
-}
-
 /**
  * Height of the text's visual middle above its baseline, in points. Measured from the actual glyphs,
  * so scripts with tall marks or a headline (e.g. Devanagari) centre as well as Latin text.
  */
 function inkMiddle(text, sizePt, fontKey) {
-  const f = FONTS[fontKey] || FONTS.helvetica;
   const ctx = document.createElement('canvas').getContext('2d');
-  ctx.font = `${f.weight || 'normal'} ${sizePt}px ${f.css}`;
+  ctx.font = cssFont(fontKey, sizePt);
   const m = ctx.measureText(text);
   const mid = (m.actualBoundingBoxAscent - m.actualBoundingBoxDescent) / 2;
   return Number.isFinite(mid) && mid > 0 ? mid : sizePt * 0.35;
@@ -99,9 +90,8 @@ export const watermark = {
       const prev = await previewBox(pdf);
       function update() {
         const k = prev.box.clientWidth / prev.pageWidth || 0.5;
-        const f = FONTS[font.value];
         const sz = Number(size.value), a = Number(angle.value);
-        const tw = previewTextWidth(text.value, sz, font.value);
+        const tw = measureCanvas(text.value, sz, font.value);
         const centres = text.value ? watermarkCentres(mode, prev.pageWidth, prev.pageHeight, tw, sz, a) : [];
         prev.overlay.className = 'stamp-overlay';
         prev.overlay.replaceChildren(...centres.map(([cx, cy]) =>
@@ -109,12 +99,14 @@ export const watermark = {
             class: 'stamp-mark',
             style: {
               left: `${cx * k}px`, top: `${(prev.pageHeight - cy) * k}px`,
-              fontFamily: f.css, fontWeight: f.weight || 'normal', fontSize: `${sz * k}px`,
+              ...fontStyles(font.value), fontSize: `${sz * k}px`,
               color: color.value, opacity: opacity.value / 100, transform: `translate(-50%, -50%) rotate(${-a}deg)`,
             },
           }, text.value)));
       }
       [text, font, size, color, opacity, angle].forEach((c) => c.addEventListener('input', update));
+      // redraw once a fallback font the preview measures with has loaded
+      [text, font].forEach((c) => c.addEventListener('input', () => loadFonts([font.value], text.value).then(update)));
       new ResizeObserver(update).observe(prev.box);
 
       layout.work.append(prev.box);
@@ -131,6 +123,7 @@ export const watermark = {
           if (!targets) return;
           return withBusy('Adding watermark…', async () => {
             const doc = await openForEdit(bytes);
+            await loadFonts([font.value], text.value);
             const sz = Number(size.value), a = Number(angle.value), rad = (a * Math.PI) / 180;
             const tw = await measureText(doc, text.value, sz, font.value);
             const opts = { size: sz, fontKey: font.value, color: color.value, opacity: opacity.value / 100, angle: a };
@@ -149,6 +142,7 @@ export const watermark = {
         }),
       );
       update();
+      loadFonts([font.value], text.value).then(update);
     });
   },
 };
@@ -190,7 +184,6 @@ export const pageNumbers = {
       const prev = await previewBox(pdf);
       function update() {
         const k = prev.box.clientWidth / prev.pageWidth || 0.5;
-        const f = FONTS[font.value];
         const m = `${numberValue(margin, 28, 0, 200) * k}px`;
         let count = pdf.numPages;
         try { count = range(pages.value, pdf.numPages).size; } catch { /* invalid range: reported on submit */ }
@@ -198,7 +191,7 @@ export const pageNumbers = {
         const label = format.value.replace('{n}', first).replace('{total}', first + count - 1);
         prev.overlay.className = 'stamp-overlay';
         const s = el('span', { class: 'num-preview', style: {
-          fontFamily: f.css, fontWeight: f.weight || 'normal', fontSize: `${numberValue(size, 11, 5, 72) * k}px`, color: color.value,
+          ...fontStyles(font.value), fontSize: `${numberValue(size, 11, 5, 72) * k}px`, color: color.value,
           top: pos[0] === 't' ? m : 'auto', bottom: pos[0] === 'b' ? m : 'auto',
           left: pos[1] === 'l' ? m : pos[1] === 'c' ? '50%' : 'auto', right: pos[1] === 'r' ? m : 'auto',
           transform: pos[1] === 'c' ? 'translateX(-50%)' : 'none',
@@ -206,6 +199,7 @@ export const pageNumbers = {
         prev.overlay.replaceChildren(s);
       }
       [format, start, size, margin, font, color, pages].forEach((c) => c.addEventListener('input', update));
+      font.addEventListener('input', () => loadFonts([font.value]).then(update));
       new ResizeObserver(update).observe(prev.box);
 
       layout.work.append(prev.box);
@@ -238,6 +232,7 @@ export const pageNumbers = {
         }),
       );
       update();
+      loadFonts([font.value]).then(update);
     });
   },
 };

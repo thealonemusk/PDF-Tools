@@ -17,5 +17,12 @@
 /assets/*.wasm
   Content-Type: application/wasm
 
+# pdf.js runtime data (CMaps, standard fonts, ICC profile, wasm decoders); file names aren't hashed
+/pdfjs/*
+  Cache-Control: public, max-age=604800
+
+/pdfjs/wasm/*.wasm
+  Content-Type: application/wasm
+
 /index.html
   Cache-Control: public, max-age=0, must-revalidate

@@ -2,78 +2,22 @@
 import JSZip from 'jszip';
 import { PDFDocument } from '@cantoo/pdf-lib';
 import { el, dropzone, toolLayout, withBusy, download, pickFiles, toast, field, select, segmented, baseName, parseRanges } from '../lib/ui.js';
-import { saveDoc, renderPage, canvasToBlob, blobToBytes } from '../lib/pdf.js';
+import { saveDoc, renderPage, canvasToBlob } from '../lib/pdf.js';
+import { pdfImageData, embedImageData } from '../lib/image.js';
 import { cardGrid, iconButton } from '../lib/grid.js';
 import { singlePdfTool, actionButton, panel } from '../lib/tool.js';
 
 const PAGE_SIZES = { a4: [595.28, 841.89], letter: [612, 792], legal: [612, 1008] };
 const IMAGE_ACCEPT = 'image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp';
 
-async function loadImage(file) {
+/** Decode an image file. Its object URL stays valid (it is revoked when the tool closes). */
+async function loadImage(file, urls) {
   const url = URL.createObjectURL(file);
-  try {
-    const img = new Image();
-    img.src = url;
-    await img.decode();
-    return img;
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-}
-
-/** Read the EXIF orientation tag (1–8) of a JPEG; 1 when absent. */
-function jpegOrientation(bytes) {
-  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (v.byteLength < 4 || v.getUint16(0) !== 0xffd8) return 1;
-  let off = 2;
-  while (off + 4 <= v.byteLength) {
-    const marker = v.getUint16(off);
-    if ((marker & 0xff00) !== 0xff00 || marker === 0xffda) break; // start of scan: no more metadata
-    const len = v.getUint16(off + 2);
-    if (marker === 0xffe1 && off + 10 <= v.byteLength && v.getUint32(off + 4) === 0x45786966) {
-      const tiff = off + 10;
-      if (tiff + 8 > v.byteLength) return 1;
-      const le = v.getUint16(tiff) === 0x4949;
-      const ifd = tiff + v.getUint32(tiff + 4, le);
-      if (ifd + 2 > v.byteLength) return 1;
-      const count = v.getUint16(ifd, le);
-      for (let i = 0; i < count; i++) {
-        const e = ifd + 2 + i * 12;
-        if (e + 12 > v.byteLength) return 1;
-        if (v.getUint16(e, le) === 0x0112) return v.getUint16(e + 8, le) || 1;
-      }
-      return 1;
-    }
-    off += 2 + len;
-  }
-  return 1;
-}
-
-/** Re-encode a decoded image (EXIF orientation already applied by the browser); JPEG unless it has transparency. */
-async function reencode(doc, img) {
-  const c = document.createElement('canvas');
-  c.width = img.naturalWidth;
-  c.height = img.naturalHeight;
-  const ctx = c.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0);
-  const px = ctx.getImageData(0, 0, c.width, c.height).data;
-  let opaque = true;
-  for (let i = 3; i < px.length; i += 4) if (px[i] < 255) { opaque = false; break; }
-  if (opaque) return doc.embedJpg(await blobToBytes(await canvasToBlob(c, 'image/jpeg', 0.92)));
-  return doc.embedPng(await blobToBytes(await canvasToBlob(c, 'image/png')));
-}
-
-/** Embed any browser-decodable image; JPEG/PNG are embedded as-is when possible, others are re-encoded. */
-async function embedImage(doc, file, img) {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  try {
-    // rotated/mirrored camera photos must be re-encoded upright, the PDF would ignore the EXIF tag
-    if ((file.type === 'image/jpeg' || /\.jpe?g$/i.test(file.name)) && jpegOrientation(bytes) === 1) return await doc.embedJpg(bytes);
-    if (file.type === 'image/png' || /\.png$/i.test(file.name)) return await doc.embedPng(bytes);
-  } catch {
-    // unusual encoding or wrong extension: fall back to the browser's decoder
-  }
-  return reencode(doc, img);
+  urls.push(url);
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  return img;
 }
 
 export const imagesToPdf = {
@@ -85,6 +29,7 @@ export const imagesToPdf = {
   mount(container) {
     const layout = toolLayout(container, this);
     let grid;
+    const urls = [];
     let size = 'a4';
     let orientation = 'portrait';
     const marginSel = select([['0', 'No margin'], ['20', 'Small'], ['40', 'Large']], '0');
@@ -94,8 +39,8 @@ export const imagesToPdf = {
         const items = [];
         for (const file of files) {
           try {
-            const img = await loadImage(file);
-            items.push({ file, img, url: img.src, id: crypto.randomUUID() });
+            const img = await loadImage(file, urls);
+            items.push({ file, img, id: crypto.randomUUID() });
           } catch {
             toast(`Could not read image "${file.name}"`, 'error');
           }
@@ -107,7 +52,7 @@ export const imagesToPdf = {
           items,
           renderCard(it, i, api) {
             return el('div', { class: 'card' },
-              el('div', { class: 'thumb-frame' }, el('img', { src: previewUrl(it), alt: '', draggable: false })),
+              el('div', { class: 'thumb-frame' }, el('img', { src: it.img.src, alt: '', draggable: false })),
               el('div', { class: 'card-label', title: it.file.name }, it.file.name),
               el('div', { class: 'card-actions' },
                 iconButton('left', 'Move left', () => api.move(i, i - 1)),
@@ -143,12 +88,6 @@ export const imagesToPdf = {
       });
     }
 
-    const previews = new Map();
-    function previewUrl(it) {
-      if (!previews.has(it.id)) previews.set(it.id, URL.createObjectURL(it.file));
-      return previews.get(it.id);
-    }
-
     async function convert() {
       if (!grid.items.length) return toast('Add at least one image.', 'error');
       await withBusy('Creating PDF…', async (progress) => {
@@ -156,7 +95,7 @@ export const imagesToPdf = {
         const margin = Number(marginSel.value);
         for (const [i, it] of grid.items.entries()) {
           progress(`Adding image ${i + 1} of ${grid.items.length}…`);
-          const image = await embedImage(doc, it.file, it.img);
+          const image = await embedImageData(doc, await pdfImageData(it.file, it.img), it.img);
           const iw = image.width, ih = image.height;
           let pw, ph;
           if (size === 'fit') {
@@ -180,16 +119,9 @@ export const imagesToPdf = {
     }
 
     layout.intro.append(dropzone({ accept: IMAGE_ACCEPT, multiple: true, label: 'Select images', onFiles: addFiles }));
-    return () => previews.forEach((u) => URL.revokeObjectURL(u));
+    return () => urls.forEach((u) => URL.revokeObjectURL(u));
   },
 };
-
-/** Lower the render scale for huge pages so the canvas stays within browser limits. */
-async function safeScale(pdf, pageNumber, scale) {
-  const vp = (await pdf.getPage(pageNumber)).getViewport({ scale });
-  const k = Math.min(1, 14000 / Math.max(vp.width, vp.height), Math.sqrt(50e6 / (vp.width * vp.height)));
-  return scale * k;
-}
 
 export const pdfToImages = {
   id: 'pdf2img',
@@ -227,7 +159,7 @@ export const pdfToImages = {
             const blobs = [];
             for (const [i, idx] of pages.entries()) {
               progress(`Rendering page ${i + 1} of ${pages.length}…`);
-              const { canvas } = await renderPage(pdf, idx + 1, await safeScale(pdf, idx + 1, scale));
+              const { canvas } = await renderPage(pdf, idx + 1, scale);
               blobs.push([`${name}_page${String(idx + 1).padStart(digits, '0')}.${format}`, await canvasToBlob(canvas, type, 0.92)]);
               canvas.width = canvas.height = 0;
             }

@@ -151,17 +151,26 @@ export function openSignaturePad() {
       } else {
         const text = nameInput.value.trim();
         if (!text) return toast('Type your name first.', 'error');
-        await document.fonts.load(`96px "${typeFont}"`).catch(() => {});
+        const font = `96px "${typeFont}", cursive`;
+        // pass the text so the web-font subsets it needs (e.g. latin-ext for "ł", "ő") are loaded too
+        await document.fonts.load(font, text).catch(() => {});
         canvas = document.createElement('canvas');
         const c = canvas.getContext('2d');
-        const font = `96px "${typeFont}", cursive`;
         c.font = font;
-        canvas.width = Math.ceil(c.measureText(text).width) + 60;
-        canvas.height = 180;
+        // size the canvas from the real glyph bounds: script capitals and descenders swing far outside
+        // the advance width and the em box, and a fixed 180px-high canvas clipped them
+        const m = c.measureText(text);
+        const left = Math.ceil(Math.max(0, m.actualBoundingBoxLeft || 0));
+        const right = Math.ceil(Math.max(m.width, m.actualBoundingBoxRight || 0));
+        const ascent = Math.ceil(Math.max(96, m.actualBoundingBoxAscent || 0));
+        const descent = Math.ceil(Math.max(40, m.actualBoundingBoxDescent || 0));
+        const pad = 24;
+        canvas.width = left + right + pad * 2;
+        canvas.height = ascent + descent + pad * 2;
         c.font = font;
         c.fillStyle = ink;
-        c.textBaseline = 'middle';
-        c.fillText(text, 30, 95);
+        c.textBaseline = 'alphabetic';
+        c.fillText(text, pad + left, pad + ascent);
         canvas = trim(canvas) || canvas;
       }
       const blob = await canvasToBlob(canvas, 'image/png');

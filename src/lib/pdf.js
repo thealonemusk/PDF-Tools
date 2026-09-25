@@ -6,6 +6,17 @@ import { promptPassword } from './ui.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
+// Runtime data pdf.js fetches by file name (copied to /pdfjs/ by the Vite plugin in vite.config.js).
+const PDFJS_ASSETS = new URL(`${import.meta.env.BASE_URL}pdfjs/`, document.baseURI).href;
+const RENDER_OPTIONS = {
+  isEvalSupported: false,
+  cMapUrl: `${PDFJS_ASSETS}cmaps/`,
+  cMapPacked: true,
+  standardFontDataUrl: `${PDFJS_ASSETS}standard_fonts/`,
+  iccUrl: `${PDFJS_ASSETS}iccs/`,
+  wasmUrl: `${PDFJS_ASSETS}wasm/`,
+};
+
 export { pdfjsLib };
 
 export async function readFile(file) {
@@ -96,7 +107,7 @@ export async function readPdfFile(file) {
 
 /** Open a document with pdf.js for rendering. Bytes are copied because pdf.js transfers them to its worker. */
 export async function openForRender(bytes) {
-  return pdfjsLib.getDocument({ data: bytes.slice(), isEvalSupported: false }).promise;
+  return pdfjsLib.getDocument({ ...RENDER_OPTIONS, data: bytes.slice() }).promise;
 }
 
 /** Open a document with pdf-lib for modification. */
@@ -108,14 +119,27 @@ export async function saveDoc(doc) {
   return doc.save({ useObjectStreams: true });
 }
 
-/** Render a page into a new canvas. `scale` is relative to 72 dpi. */
+/**
+ * Paint annotation appearances, including filled-in form fields, into the canvas. This is the pdf.js
+ * default today, but ENABLE_FORMS (forms left to an HTML layer we don't have) would silently drop
+ * form values from previews and from every export that rasterizes pages, so it is pinned here.
+ */
+export const ANNOTATION_MODE = pdfjsLib.AnnotationMode.ENABLE;
+
+/** Lower `scale` for huge pages so the canvas stays within browser limits. */
+export function safeScale(page, scale) {
+  const vp = page.getViewport({ scale });
+  return scale * Math.min(1, 14000 / Math.max(vp.width, vp.height), Math.sqrt(50e6 / (vp.width * vp.height)));
+}
+
+/** Render a page into a new canvas. `scale` is relative to 72 dpi (reduced if the canvas would be too big). */
 export async function renderPage(pdf, pageNumber, scale, { rotation = 0, background = 'white' } = {}) {
   const page = await pdf.getPage(pageNumber);
-  const viewport = page.getViewport({ scale, rotation: (page.rotate + rotation) % 360 });
+  const viewport = page.getViewport({ scale: safeScale(page, scale), rotation: (page.rotate + rotation) % 360 });
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.floor(viewport.width));
   canvas.height = Math.max(1, Math.floor(viewport.height));
-  await page.render({ canvas, viewport, background }).promise;
+  await page.render({ canvas, viewport, background, annotationMode: ANNOTATION_MODE }).promise;
   return { canvas, viewport, page };
 }
 

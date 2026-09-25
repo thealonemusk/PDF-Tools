@@ -4,14 +4,12 @@
 // so they're independent of the on-screen zoom level.
 import { BlendMode, LineCapStyle, degrees } from '@cantoo/pdf-lib';
 import { el, withBusy, download, toast, field, select, baseName, pickFiles } from '../lib/ui.js';
-import { openForEdit, openForRender, renderPage, saveDoc, canvasToBlob, blobToBytes } from '../lib/pdf.js';
-import { FONTS, pageFrame, hexToRgb, drawTextVisual, drawImageVisual, drawRectVisual } from '../lib/stamp.js';
+import { openForEdit, openForRender, renderPage, saveDoc, canvasToBlob, blobToBytes, ANNOTATION_MODE } from '../lib/pdf.js';
+import { FONTS, fontOf, fontStyles, loadFonts, pageFrame, hexToRgb, drawTextVisual, drawImageVisual, drawRectVisual } from '../lib/stamp.js';
+import { pdfImageData, embedImageData } from '../lib/image.js';
 import { singlePdfTool, actionButton, panel } from '../lib/tool.js';
 import { openSignaturePad } from '../lib/signature.js';
 
-// Where the first baseline sits inside a CSS line box (line-height 1.2), as a fraction of font size.
-// Fallback only: see baselineEm().
-const BASELINE = { helvetica: 0.947, 'helvetica-bold': 0.947, times: 0.938, 'times-bold': 0.938, courier: 0.867 };
 const LINE_HEIGHT = 1.2;
 
 const baselineCache = new Map();
@@ -21,17 +19,16 @@ const baselineCache = new Map();
  * the ascent, descent and half-leading to whole pixels, so this depends on the displayed size
  * (e.g. Times at 100% zoom sits at 0.918em, not the 0.938em its metrics give), and the fonts behind
  * the CSS families differ per OS. Checked against painted pixels in Chrome at DPR 1-3: mean error
- * ~0 (vs ~0.5px, up to 1.5px, for the fixed BASELINE fractions).
+ * ~0 (vs ~0.5px, up to 1.5px, for the fixed `baseline` fractions in FONTS, now only a fallback).
  */
 function baselineEm(fontKey, px) {
   const key = `${fontKey}|${px.toFixed(3)}`;
   if (!baselineCache.has(key)) {
-    const f = FONTS[fontKey] || FONTS.helvetica;
     const probe = document.createElement('div');
     const mark = document.createElement('span');
     Object.assign(probe.style, {
       position: 'absolute', left: '-10000px', top: '0', visibility: 'hidden', whiteSpace: 'pre',
-      fontFamily: f.css, fontWeight: f.weight || 'normal', fontSize: `${px}px`, lineHeight: LINE_HEIGHT,
+      ...fontStyles(fontKey), fontSize: `${px}px`, lineHeight: LINE_HEIGHT,
     });
     Object.assign(mark.style, { display: 'inline-block', width: '0', height: '0' });
     probe.append('x', mark);
@@ -39,7 +36,7 @@ function baselineEm(fontKey, px) {
     const em = (mark.getBoundingClientRect().bottom - probe.getBoundingClientRect().top) / px;
     probe.remove();
     if (baselineCache.size > 200) baselineCache.clear();
-    baselineCache.set(key, em > 0.5 && em < 1.5 ? em : BASELINE[fontKey] ?? BASELINE.helvetica);
+    baselineCache.set(key, em > 0.5 && em < 1.5 ? em : fontOf(fontKey).baseline);
   }
   return baselineCache.get(key);
 }
@@ -85,20 +82,15 @@ async function imageFromFile(file) {
   const url = URL.createObjectURL(file);
   const img = new Image();
   img.src = url;
-  await img.decode();
-  let bytes, mime;
-  if (file.type === 'image/png' || file.type === 'image/jpeg') {
-    bytes = new Uint8Array(await file.arrayBuffer());
-    mime = file.type;
-  } else {
-    const c = document.createElement('canvas');
-    c.width = img.naturalWidth;
-    c.height = img.naturalHeight;
-    c.getContext('2d').drawImage(img, 0, 0);
-    bytes = await blobToBytes(await canvasToBlob(c, 'image/png'));
-    mime = 'image/png';
+  try {
+    await img.decode();
+    // the size shown and the bytes saved must agree: EXIF-rotated JPEGs etc. are re-encoded upright
+    const { bytes, mime } = await pdfImageData(file, img);
+    return { bytes, mime, url, img, width: img.naturalWidth, height: img.naturalHeight };
+  } catch (err) {
+    URL.revokeObjectURL(url);
+    throw err;
   }
-  return { bytes, mime, url, width: img.naturalWidth, height: img.naturalHeight };
 }
 
 // ---------- existing text ----------
@@ -162,14 +154,22 @@ function textRuns(content, viewport) {
   });
 }
 
-/** Pick the closest standard font for a pdf.js font. */
+/**
+ * Pick the closest standard font for a pdf.js font. The PostScript name decides when it names a known
+ * family; otherwise the generic family pdf.js derived from the font's flags (`family`) does. (Words
+ * like "Roman" or "Book" are weight names in many sans fonts, e.g. "Frutiger-Roman", so they don't count.)
+ */
 function guessFont(fontObj, family) {
-  const name = `${fontObj?.name || ''} ${fontObj?.fallbackName || ''}`;
-  const bold = fontObj?.bold || fontObj?.black || /bold|black|heavy|semibold|demi/i.test(name);
-  if (/mono|courier|consol/i.test(name) || family === 'monospace') return 'courier';
-  const serif = (/times|roman|serif|georgia|garamond|cambria|minion|palatino|book/i.test(name) && !/sans/i.test(name)) || family === 'serif';
-  if (serif) return bold ? 'times-bold' : 'times';
-  return bold ? 'helvetica-bold' : 'helvetica';
+  const name = String(fontObj?.name || '').replace(/^[A-Z]{6}\+/, ''); // drop the subset tag
+  const bold = !!(fontObj?.bold || fontObj?.black) || /bold|black|heavy|semibold|demi/i.test(name);
+  const italic = !!fontObj?.italic || /italic|oblique|slanted/i.test(name);
+  let group;
+  if (/mono|courier|consol|menlo|typewriter/i.test(name) || family === 'monospace') group = 'courier';
+  else if (/sans|arial|helvet|verdana|tahoma|calibri|segoe|roboto|frutiger|avenir|futura|gill|franklin|univers|myriad|lato|inter\b/i.test(name)) group = 'helvetica';
+  else if (/times|serif|georgia|garamond|cambria|minion|palatino|antiqua|baskerville|bodoni|caslon|century|didot|charter|book ?man/i.test(name)) group = 'times';
+  else group = family === 'serif' ? 'times' : 'helvetica';
+  const slant = group === 'times' ? 'italic' : 'oblique';
+  return [group, bold && 'bold', italic && slant].filter(Boolean).join('-');
 }
 
 const toHex = (c) => `#${c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('')}`;
@@ -352,6 +352,9 @@ function mountEditor(container, meta, { signMode = false } = {}) {
       actionButton('Save & download', save),
     );
 
+    // metric-compatible fallback fonts (where needed) must be ready before text is measured or shown
+    await loadFonts();
+    baselineCache.clear();
     const pages = [];
     const baseWidth = Math.max(280, Math.min(pagesBox.clientWidth - 24, 900));
     for (let i = 1; i <= pdf.numPages; i++) {
@@ -401,7 +404,7 @@ function mountEditor(container, meta, { signMode = false } = {}) {
       const off = document.createElement('canvas');
       off.width = Math.floor(viewport.width);
       off.height = Math.floor(viewport.height);
-      await info.page.render({ canvas: off, viewport }).promise;
+      await info.page.render({ canvas: off, viewport, annotationMode: ANNOTATION_MODE }).promise;
       if (token !== info.token) return;
       info.canvas.width = off.width;
       info.canvas.height = off.height;
@@ -614,8 +617,7 @@ function mountEditor(container, meta, { signMode = false } = {}) {
         Object.assign(o.mask.style, { left: `${b.x * s}px`, top: `${b.y * s}px`, width: `${b.w * s}px`, height: `${b.h * s}px`, background: b.bg });
       }
       if (o.type === 'text') {
-        const f = FONTS[o.font];
-        Object.assign(o.input.style, { fontFamily: f.css, fontWeight: f.weight || 'normal', fontSize: `${o.size * s}px`, color: o.color, lineHeight: LINE_HEIGHT });
+        Object.assign(o.input.style, { ...fontStyles(o.font), fontSize: `${o.size * s}px`, color: o.color, lineHeight: LINE_HEIGHT });
         return;
       }
       n.style.width = `${o.w * s}px`;
@@ -865,12 +867,13 @@ function mountEditor(container, meta, { signMode = false } = {}) {
         const docPages = doc.getPages();
         const embedded = new Map();
         const embed = async (src) => {
-          if (!embedded.has(src)) embedded.set(src, src.mime === 'image/png' ? doc.embedPng(src.bytes) : doc.embedJpg(src.bytes));
+          if (!embedded.has(src)) embedded.set(src, embedImageData(doc, src, src.img));
           return embedded.get(src);
         };
         // draw in creation order so later items stack on top
         const list = [...objects].sort((a, b) => a.id - b.id);
         const covered = new Set(); // pages whose original content was hidden, flattened if requested
+        let drawn = 0;
         for (const o of list) {
           const page = docPages[o.page];
           const info = pages[o.page];
@@ -878,6 +881,7 @@ function mountEditor(container, meta, { signMode = false } = {}) {
           const k = frame.width / info.vw; // pdf.js vs pdf-lib box mismatch guard (normally 1)
           const VH = frame.height;
           const x = o.x * k, y = o.y * k;
+          if (!(o.orig && JSON.stringify(snapshot(o)) === o.pristine)) drawn++;
           if (o.type === 'text') {
             if (o.orig) {
               if (JSON.stringify(snapshot(o)) === o.pristine) continue; // opened for editing but left as it was
@@ -917,6 +921,7 @@ function mountEditor(container, meta, { signMode = false } = {}) {
             });
           }
         }
+        if (!drawn) return toast('Nothing has changed yet — edit the text or add something first.', 'error');
         let out = await saveDoc(doc);
         if (redactBox.checked && covered.size) out = await flattenPages(out, covered, progress);
         download(out, `${baseName(file.name)}_edited.pdf`);
